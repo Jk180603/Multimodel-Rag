@@ -9,3 +9,5 @@ sentence-transformers
 langchain
 langchain-community
 torch
+transformers
+accelerate
