@@ -1,0 +1,11 @@
+streamlit
+pdfplumber
+pytesseract
+Pillow
+pandas
+openpyxl
+faiss-cpu
+sentence-transformers
+langchain
+langchain-community
+torch
