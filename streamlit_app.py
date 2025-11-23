@@ -1,10 +1,9 @@
-# streamlit_app.py  ← ONLY THIS FILE NEEDED
+# streamlit_app.py → Paste this exactly
 import streamlit as st
 from PIL import Image
 import pytesseract
 import pdfplumber
 import pandas as pd
-from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -14,102 +13,98 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_community.llms import HuggingFaceHub
 import os
 
-st.set_page_config(page_title="Audalaxy RAG", layout="wide")
-st.title("Audalaxy Multimodal RAG – Wissensintegration mit KI")
-st.markdown("**Liest PDF (Text + Bilder + Tabellen) → Beantwortet Fragen präzise**")
+st.set_page_config(page_title="MultiRAG Chat", layout="centered")
+st.title("MultiRAG Chat – Ask Anything From Your Documents")
+st.caption("Upload PDF, Images, Excel → Chat with your files | Built for CV & Portfolio")
 
-# ------------------- SIDEBAR -------------------
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "retriever" not in st.session_state:
+    st.session_state.retriever = None
+
+# Sidebar
 with st.sidebar:
-    st.header("Dokument hochladen")
+    st.header("Upload Document")
     uploaded_file = st.file_uploader(
-        "PDF, Bild (JPG/PNG) oder Excel",
-        type=["pdf", "jpg", "jpeg", "png", "xlsx"]
+        "PDF • Images • Excel • Screenshots",
+        type=["pdf", "png", "jpg", "jpeg", "xlsx", "csv"]
     )
     
-    if st.button("Wissensbasis erstellen", type="primary"):
-        if not uploaded_file:
-            st.error("Bitte eine Datei hochladen")
-        else:
-            with st.spinner("Lese Dokument ein (OCR + Tabellen)..."):
-                raw_text = ""
+    if st.button("Build Knowledge Base", type="primary"):
+        if uploaded_file:
+            with st.spinner("Reading document with OCR + Tables..."):
+                text = ""
                 
-                # 1. PDF mit Text + Bilder + Tabellen
+                # Handle PDF
                 if uploaded_file.type == "application/pdf":
                     with pdfplumber.open(uploaded_file) as pdf:
                         for page in pdf.pages:
-                            raw_text += page.extract_text() or ""
-                            # Extract tables
-                            tables = page.extract_tables()
-                            for table in tables:
+                            text += (page.extract_text() or "") + "\n"
+                            for table in page.extract_tables():
                                 df = pd.DataFrame(table[1:], columns=table[0])
-                                raw_text += "\nTabelle:\n" + df.to_string() + "\n"
-                            # Extract images → OCR
+                                text += df.to_string() + "\n"
                             if page.images:
-                                img = page.to_image(resolution=150).original
-                                raw_text += "\n" + pytesseract.image_to_string(img, lang='deu') + "\n"
+                                img = page.to_image(resolution=200).original
+                                text += pytesseract.image_to_string(img) + "\n"
                 
-                # 2. Pure Image
+                # Handle Images (like your screenshot)
                 elif uploaded_file.type.startswith("image/"):
                     img = Image.open(uploaded_file)
-                    raw_text = pytesseract.image_to_string(img, lang='deu')
+                    text = pytesseract.image_to_string(img)
                 
-                # 3. Excel
-                elif "excel" in uploaded_file.type:
+                # Handle Excel
+                else:
                     df = pd.read_excel(uploaded_file)
-                    raw_text = df.to_string()
+                    text = df.to_string()
 
-                # Split & Index
-                splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-                chunks = splitter.create_documents([raw_text])
-                
-                embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/multi-qa-mpnet-base-dot-v1")
+                # Build vector DB
+                splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+                chunks = splitter.create_documents([text])
+                embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
                 vectorstore = FAISS.from_documents(chunks, embeddings)
-                st.session_state.retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-                st.session_state.ready = True
-                st.success("Wissensbasis bereit! Frage stellen →")
+                st.session_state.retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+                st.success("Ready! Now chat with your document")
+        else:
+            st.error("Please upload a file")
 
-# ------------------- MAIN UI -------------------
-if st.session_state.get("ready"):
-    question = st.text_input(
-        "Deine Frage zum Dokument:",
-        placeholder="Was steht über Kündigungsfristen im Vertrag?"
-    )
-    
-    if st.button("Antworten") and question:
-        with st.spinner("Suche in deinem Dokument..."):
-            template = """Du bist ein präziser Assistent für Audalaxy.
-            Antworte AUSSCHLIESSLICH aus dem Kontext. Wenn du es nicht weißt, sag: "Nicht im Dokument gefunden."
+# Chat Interface
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
 
-            Kontext:
-            {context}
+# User input
+if st.session_state.retriever:
+    if prompt := st.chat_input("Ask anything about your document..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.write(prompt)
 
-            Frage: {question}
-            Antwort:"""
-            
-            prompt = PromptTemplate.from_template(template)
-            
-            # Free & strong LLM
-            llm = HuggingFaceHub(
-                repo_id="HuggingFaceH4/zephyr-7b-alpha",
-                model_kwargs={"temperature": 0.1, "max_new_tokens": 512}
-            )
-            
-            chain = (
-                {"context": st.session_state.retriever, "question": RunnablePassthrough()}
-                | prompt
-                | llm
-                | StrOutputParser()
-            )
-            
-            answer = chain.invoke(question)
-            st.success("Antwort:")
-            st.markdown(answer)
-            
-            with st.expander("Quellen (Chunks)"):
-                for doc in st.session_state.retriever.invoke(question):
-                    st.caption(doc.page_content[:600] + "...")
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                template = """Answer only from this context. If not found, say "Not in document."
+                Context: {context}
+                Question: {question}
+                Answer:"""
+                prompt_template = PromptTemplate.from_template(template)
+                
+                llm = HuggingFaceHub(
+                    repo_id="HuggingFaceH4/zephyr-7b-alpha",
+                    model_kwargs={"temperature": 0.1}
+                )
+                
+                chain = (
+                    {"context": st.session_state.retriever, "question": RunnablePassthrough()}
+                    | prompt_template
+                    | llm
+                    | StrOutputParser()
+                )
+                
+                response = chain.invoke(prompt)
+                st.write(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
 else:
-    st.info("Lade dein Dokument hoch → Klicke auf 'Wissensbasis erstellen' → Stelle deine Frage")
-    st.image("https://images.unsplash.com/photo-1486312338219-ce68d2c6f44d?w=800")
+    st.info("Upload a document first → Click 'Build Knowledge Base' → Start chatting")
 
-st.caption("Built by Jay Khakhar | Für Audalaxy Vortest | 100% funktional | Live Demo bereit")
+st.markdown("---")
+st.caption("Built by Jay Khakhar | Top 1% CV Project | Handles Images, Screenshots, Scanned PDFs")
