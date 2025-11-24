@@ -1,4 +1,3 @@
-# streamlit_app.py → ONLY THIS FILE – 100% WORKING
 import streamlit as st
 from PIL import Image
 import pytesseract
@@ -10,31 +9,38 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
 import torch
 
-st.set_page_config(page_title="MultiRAG Chat", layout="centered", page_icon="robot")
+st.set_page_config(page_title="MultiRAG Chat", layout="centered")
 st.title("MultiRAG Chat – Talk to Your Documents")
-st.caption("Upload PDF, Images, Excel, Screenshots → Chat with them | Perfect for CV")
+st.caption("Upload PDF, Images, Excel, Screenshots → Chat with them | No API Key Needed")
 
-# Initialize session state
+# Initialize
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "retriever" not in st.session_state:
     st.session_state.retriever = None
 
-# Load local LLM (NO API KEY NEEDED)
+# Local LLM (no API key, runs offline)
 @st.cache_resource
 def load_llm():
     with st.spinner("Loading AI model (first time ~60 sec)..."):
+        model = AutoModelForCausalLM.from_pretrained(
+            "microsoft/DialoGPT-medium",
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+        tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
+        tokenizer.pad_token = tokenizer.eos_token
         return pipeline(
             "text-generation",
-            model="google/gemma-2b-it",
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+            model=model,
+            tokenizer=tokenizer,
             max_new_tokens=512,
             temperature=0.1,
-            do_sample=True
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id
         )
 
 llm = load_llm()
@@ -49,7 +55,7 @@ with st.sidebar:
     
     if st.button("Build Knowledge Base", type="primary"):
         if uploaded_file:
-            with st.spinner("Extracting text with OCR..."):
+            with st.spinner("Extracting text with OCR + Tables..."):
                 text = ""
                 
                 if uploaded_file.type == "application/pdf":
@@ -57,8 +63,9 @@ with st.sidebar:
                         for page in pdf.pages:
                             text += (page.extract_text() or "") + "\n"
                             for table in page.extract_tables():
-                                df = pd.DataFrame(table[1:], columns=table[0] if table else None)
-                                text += df.to_string() + "\n"
+                                if table:
+                                    df = pd.DataFrame(table[1:], columns=table[0])
+                                    text += df.to_string() + "\n"
                             if page.images:
                                 img = page.to_image(resolution=200).original
                                 text += pytesseract.image_to_string(img, lang='deu+eng') + "\n"
@@ -106,8 +113,8 @@ if st.session_state.retriever:
                 Question: {prompt}
                 Answer:"""
                 
-                # Generate
-                outputs = llm(full_prompt)
+                # Generate with local model (no API key)
+                outputs = llm(full_prompt, max_new_tokens=512, temperature=0.1)
                 response = outputs[0]["generated_text"].split("Answer:")[-1].strip()
                 
                 st.markdown(response)
@@ -115,7 +122,7 @@ if st.session_state.retriever:
 
 else:
     st.info("Upload your document → Click 'Build Knowledge Base' → Start chatting")
-    st.image("https://images.unsplash.com/photo-1504639725590-34d0984388bd?w=800")
+    st.image("https://images.unsplash.com/photo-1486312338219-ce68d2c6f44d?w=800", caption="Ready for PDFs, images, tables")
 
 st.markdown("---")
-st.caption("Built by Jay Khakhar | Works with Images & Screenshots | No API Key Needed | CV-Ready")
+st.caption("Built by Jay Khakhar | Works with Screenshots & Scanned PDFs | No API Key | CV-Ready Project")
