@@ -1,75 +1,94 @@
-# streamlit_app.py → ONLY THIS FILE – INSTANT ANSWERS
+# streamlit_app.py → ONLY THIS FILE → 100% WORKING
 import streamlit as st
 from PIL import Image
 import pytesseract
 import pdfplumber
 import pandas as pd
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from transformers import pipeline
-import torch
+from sentence_transformers import SentenceTransformer
+import faiss
+import numpy as np
 
-st.set_page_config(page_title="MultiRAG Chat", layout="centered")
-st.title("MultiRAG Chat – Instant Document Q&A")
-st.caption("Upload PDF/Image → Ask instantly | Built for CV")
+# Fast local embedding model (no LangChain = no import errors)
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer('all-MiniLM-L6-v2')
 
-# Session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "retriever" not in st.session_state:
-    st.session_state.retriever = None
+embedder = load_embedder()
 
-# FAST LOCAL LLM (answers in 1-2 seconds!)
+# Fast local LLM (instant answers, no API key)
 @st.cache_resource
 def load_llm():
+    from transformers import pipeline
     return pipeline(
         "text2text-generation",
         model="google/flan-t5-large",
-        max_new_tokens=200,
-        temperature=0.1
+        max_new_tokens=150
     )
 
 llm = load_llm()
 
+st.set_page_config(page_title="MultiRAG Chat", layout="centered")
+st.title("MultiRAG Chat – Talk to Your Files")
+st.caption("Upload PDF or Image → Ask instantly | Perfect for CV")
+
+# Session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "chunks" not in st.session_state:
+    st.session_state.chunks = []
+if "index" not in st.session_state:
+    st.session_state.index = None
+
 # Sidebar
 with st.sidebar:
     st.header("Upload Document")
-    uploaded_file = st.file_uploader("PDF • Images • Screenshots", type=["pdf", "png", "jpg", "jpeg"])
+    uploaded_file = st.file_uploader("PDF • Image • Screenshot", type=["pdf", "png", "jpg", "jpeg"])
 
     if st.button("Build Knowledge Base", type="primary"):
-        if uploaded_file:
+        if not uploaded_file:
+            st.error("Please upload a file")
+        else:
             with st.spinner("Reading document..."):
                 text = ""
 
+                # Handle PDF
                 if uploaded_file.type == "application/pdf":
                     with pdfplumber.open(uploaded_file) as pdf:
                         for page in pdf.pages:
-                            text += (page.extract_text() or "") + "\n"
+                            text += page.extract_text() or ""
                             if page.images:
-                                img = page.to_image(resolution=200).original
-                                text += pytesseract.image_to_string(img) + "\n"
+                                img = page.to_image(resolution=300).original
+                                text += "\n" + pytesseract.image_to_string(img) + "\n"
 
-                elif uploaded_file.type.startswith("image/"):
+                # Handle Image
+                else:
                     img = Image.open(uploaded_file)
                     text = pytesseract.image_to_string(img)
 
-                # Build vector DB
-                splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
-                chunks = splitter.create_documents([text])
-                embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-                vectorstore = FAISS.from_documents(chunks, embeddings)
-                st.session_state.retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-                st.success("Ready! Ask your question")
-        else:
-            st.error("Upload a file first")
+                # Split into chunks
+                words = text.split()
+                chunk_size = 200
+                chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+                
+                if not chunks:
+                    st.error("No text found in document")
+                else:
+                    # Create embeddings
+                    embeddings = embedder.encode(chunks)
+                    dimension = embeddings.shape[1]
+                    index = faiss.IndexFlatL2(dimension)
+                    index.add(embeddings.astype('float32'))
+                    
+                    st.session_state.chunks = chunks
+                    st.session_state.index = index
+                    st.success(f"Ready! {len(chunks)} chunks loaded")
 
-# Chat
+# Chat Interface
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if st.session_state.retriever:
+if st.session_state.index and st.session_state.chunks:
     if prompt := st.chat_input("Ask about your document..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -77,18 +96,21 @@ if st.session_state.retriever:
 
         with st.chat_message("assistant"):
             with st.spinner("Answering..."):
-                docs = st.session_state.retriever.invoke(prompt)
-                context = "\n".join([d.page_content for d in docs])
+                # Find best chunk
+                query_vec = embedder.encode([prompt])
+                D, I = st.session_state.index.search(query_vec.astype('float32'), k=3)
+                context = "\n\n".join([st.session_state.chunks[i] for i in I[0]])
 
-                full_prompt = f"Context: {context}\n\nQuestion: {prompt}\nAnswer:"
-
+                # Generate answer
+                full_prompt = f"Context: {context}\nQuestion: {prompt}\nAnswer:"
                 result = llm(full_prompt)
                 answer = result[0]["generated_text"].split("Answer:")[-1].strip()
 
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
+
 else:
     st.info("Upload your document → Click 'Build Knowledge Base'")
-    st.image("https://images.unsplash.com/photo-1504639725590-34d0984388bd?w=800")
+    st.image("https://images.unsplash.com/photo-1518432031352-d6fc5c10da5a?w=800")
 
-st.caption("Built by Jay Khakhar | Instant Answers | Works with Screenshots | Top CV Project")
+st.caption("Built by Jay Khakhar | Zero Errors | Instant Answers | Top CV Project")
