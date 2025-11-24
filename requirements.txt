@@ -2,10 +2,7 @@ streamlit
 pdfplumber
 pytesseract
 Pillow
-pandas
-openpyxl
 faiss-cpu
 sentence-transformers
 torch
 transformers
-accelerate
