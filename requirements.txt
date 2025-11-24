@@ -6,8 +6,6 @@ pandas
 openpyxl
 faiss-cpu
 sentence-transformers
-langchain
-langchain-community
 torch
 transformers
 accelerate
