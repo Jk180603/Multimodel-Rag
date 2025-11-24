@@ -1,116 +1,146 @@
-# streamlit_app.py → ONLY THIS FILE → 100% WORKING
 import streamlit as st
 from PIL import Image
 import pytesseract
 import pdfplumber
-import pandas as pd
-from sentence_transformers import SentenceTransformer
-import faiss
 import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 
-# Fast local embedding model (no LangChain = no import errors)
-@st.cache_resource
-def load_embedder():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+############################################
+# FASTEST POSSIBLE SETTINGS
+############################################
 
-embedder = load_embedder()
-
-# Fast local LLM (instant answers, no API key)
+# Use smaller + faster LLM instead of FLAN-T5-LARGE
 @st.cache_resource
 def load_llm():
-    from transformers import pipeline
     return pipeline(
         "text2text-generation",
-        model="google/flan-t5-large",
-        max_new_tokens=150
+        model="google/flan-t5-base",   # <<< MUCH FASTER
+        max_new_tokens=120,
+        device=-1                      # auto CPU/GPU
     )
 
+# Faster embedding model
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+embedder = load_embedder()
 llm = load_llm()
 
-st.set_page_config(page_title="MultiRAG Chat", layout="centered")
-st.title("MultiRAG Chat – Talk to Your Files")
-st.caption("Upload PDF or Image → Ask instantly | Perfect for CV")
+############################################
+# STREAMLIT UI
+############################################
 
-# Session state
+st.set_page_config(page_title="MultiRAG Chat (Ultra-Fast)", layout="centered")
+st.title("⚡ MultiRAG Chat – Instant Answers from Documents")
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "chunks" not in st.session_state:
-    st.session_state.chunks = []
+
 if "index" not in st.session_state:
     st.session_state.index = None
 
-# Sidebar
-with st.sidebar:
-    st.header("Upload Document")
-    uploaded_file = st.file_uploader("PDF • Image • Screenshot", type=["pdf", "png", "jpg", "jpeg"])
+if "chunks" not in st.session_state:
+    st.session_state.chunks = []
 
-    if st.button("Build Knowledge Base", type="primary"):
-        if not uploaded_file:
-            st.error("Please upload a file")
+
+############################################
+# FILE UPLOADING + PROCESSING
+############################################
+
+with st.sidebar:
+    st.header("📄 Upload Document")
+    uploaded = st.file_uploader("Upload PDF or Image", type=["pdf", "jpg", "jpeg", "png"])
+
+    if st.button("🚀 Build Knowledge Base"):
+        if not uploaded:
+            st.error("Upload a file first")
         else:
-            with st.spinner("Reading document..."):
+            with st.spinner("Extracting and indexing..."):
+
                 text = ""
 
-                # Handle PDF
-                if uploaded_file.type == "application/pdf":
-                    with pdfplumber.open(uploaded_file) as pdf:
+                # PDF PROCESSING
+                if uploaded.type == "application/pdf":
+                    with pdfplumber.open(uploaded) as pdf:
                         for page in pdf.pages:
-                            text += page.extract_text() or ""
-                            if page.images:
-                                img = page.to_image(resolution=300).original
-                                text += "\n" + pytesseract.image_to_string(img) + "\n"
+                            txt = page.extract_text()
+                            if txt:
+                                text += txt + "\n"
 
-                # Handle Image
+                # IMAGE PROCESSING
                 else:
-                    img = Image.open(uploaded_file)
+                    img = Image.open(uploaded)
                     text = pytesseract.image_to_string(img)
 
-                # Split into chunks
-                words = text.split()
-                chunk_size = 200
-                chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
-                
-                if not chunks:
-                    st.error("No text found in document")
-                else:
-                    # Create embeddings
-                    embeddings = embedder.encode(chunks)
-                    dimension = embeddings.shape[1]
-                    index = faiss.IndexFlatL2(dimension)
-                    index.add(embeddings.astype('float32'))
-                    
-                    st.session_state.chunks = chunks
-                    st.session_state.index = index
-                    st.success(f"Ready! {len(chunks)} chunks loaded")
+                # CLEANING
+                text = " ".join(text.split())
 
-# Chat Interface
+                if len(text) < 20:
+                    st.error("No readable text found!")
+                else:
+                    # CHUNKING (small chunks = faster embedding)
+                    words = text.split()
+                    chunk_size = 120      # smaller chunks = faster indexing
+                    chunks = [
+                        " ".join(words[i:i+chunk_size])
+                        for i in range(0, len(words), chunk_size)
+                    ]
+
+                    embeddings = embedder.encode(chunks, batch_size=16)
+
+                    dim = embeddings.shape[1]
+                    index = faiss.IndexFlatL2(dim)
+                    index.add(np.array(embeddings).astype("float32"))
+
+                    st.session_state.index = index
+                    st.session_state.chunks = chunks
+
+                    st.success(f"Indexed {len(chunks)} chunks → Superfast ready!")
+
+
+############################################
+# CHAT INTERFACE
+############################################
+
+# Show chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if st.session_state.index and st.session_state.chunks:
-    if prompt := st.chat_input("Ask about your document..."):
+if st.session_state.index is not None:
+    prompt = st.chat_input("Ask something from your document...")
+
+    if prompt:
         st.session_state.messages.append({"role": "user", "content": prompt})
+
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Answering..."):
-                # Find best chunk
-                query_vec = embedder.encode([prompt])
-                D, I = st.session_state.index.search(query_vec.astype('float32'), k=3)
-                context = "\n\n".join([st.session_state.chunks[i] for i in I[0]])
+            with st.spinner("Thinking..."):
 
-                # Generate answer
-                full_prompt = f"Context: {context}\nQuestion: {prompt}\nAnswer:"
-                result = llm(full_prompt)
-                answer = result[0]["generated_text"].split("Answer:")[-1].strip()
+                query_emb = embedder.encode([prompt])
+                scores, ids = st.session_state.index.search(
+                    np.array(query_emb).astype("float32"), k=3
+                )
+
+                context = "\n\n".join(
+                    st.session_state.chunks[i] for i in ids[0]
+                )
+
+                final_prompt = (
+                    f"Answer using ONLY this context:\n\n{context}\n\n"
+                    f"Question: {prompt}\nAnswer:"
+                )
+
+                result = llm(final_prompt)[0]["generated_text"]
+                answer = result.split("Answer:")[-1].strip()
 
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
 else:
-    st.info("Upload your document → Click 'Build Knowledge Base'")
-    st.image("https://images.unsplash.com/photo-1518432031352-d6fc5c10da5a?w=800")
-
-st.caption("Built by Jay Khakhar | Zero Errors | Instant Answers | Top CV Project")
+    st.info("Upload a document and click **Build Knowledge Base**.")
